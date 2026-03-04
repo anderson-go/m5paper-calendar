@@ -1,42 +1,41 @@
-# m5paper-calendar
-a calendar app that updates automatically daily or by user request and displays the events and weather of the selected day
+# M5Paper S3 Dynamic Calendar & Planner
 
-# iPhone Shortcut Setup
+A sophisticated MicroPython-based calendar and event planner designed for the M5Paper S3 E-Ink display. This project features a dual-pane interface: a dynamic 7x5 month grid on the right and a detailed daily schedule on the left.
 
-To keep your M5Paper calendar updated, you can use a "Get Contents of URL" action in an iPhone Shortcut.
+## 🚀 Key Features
 
-### 1. JSON Structure
-The shortcut should generate a JSON body with the following schema:
+- **Dual-Pane UI**: Displays a monthly overview and a detailed daily list of events simultaneously.
+- **Dynamic Scheduling**: Supports both **All-Day** events and timed events categorized by period (Morning, Afternoon, Evening).
+- **Weather Integration**: Displays high/low temperatures and rain chances for the selected date.
+- **Direct Update via iPhone**: Runs a local HTTP server to receive JSON data directly from an iPhone Shortcut (no external API keys required on the device).
+- **Smart Power & E-Ink Management**: 
+  - Optimized rendering for fast screen refreshes.
+  - Automatic return to "Today" view after 30 seconds of inactivity.
+  - Long-press shortcuts for WiFi status and raw JSON debugging.
+- **Hardware Integration**: Real-time battery level icons and WiFi connection status.
 
-```json
-{
-  "generated_at": "2026-03-04T12:00:00",
-  "weather_ls": [{
-    "high_ls": ["23°C", "21°C", ...],
-    "low_ls": ["14°C", "12°C", ...],
-    "rain_chance_ls": [0.97, 0.10, ...]
-  }],
-  "events": [
-    {
-      "title": "Meeting",
-      "all_day": "No",
-      "start_date": "2026-03-04T10:00:00+09:00"
-    },
-    {
-      "title": "Clean House",
-      "all_day": "Yes",
-      "start_date": "2026-03-04T00:00:00+09:00"
-    }
-  ]
-}
-```
+## 🛠 Setup & Installation
 
-### 2. Shortcut Configuration
-1.  **Get Device IP**: Long-press the WiFi icon on your M5Paper to find its local IP address.
-2.  **Add Action**: "Get Contents of URL".
-3.  **URL**: `http://[DEVICE_IP]:80`
-4.  **Method**: `POST`
-5.  **Request Body**: Set to the JSON object described above.
+### 1. Hardware Preparation
+Ensure your M5Paper S3 is running **MicroPython** (M5Stack official firmware).
 
-### 3. Automation
-For the best experience, set a **Time of Day** automation in the Shortcuts app to run at `00:00` daily, ensuring your calendar is always fresh when you wake up.
+### 2. Assets Upload
+Upload the following files to your device's flash memory:
+- **Fonts**: Place your `.vlw` fonts in `/flash/res/font/`.
+- **Images**: Place your `.png` icons in `/flash/res/img/`.
+  - `bg_two_blocks_w.png` (Background)
+  - `img_back_today.png` (Home/Today Icon)
+  - `img_wifi.png`
+  - `img_battery_0.png` through `img_battery_3.png`
+
+### 3. Deployment
+Copy `calendar_dynamic.py` to your device and run it as `main.py` if you want it to start automatically on boot.
+
+## 📲 Data Synchronization
+Data is pushed to the device via a custom iPhone Shortcut. For detailed instructions on how to set up the automation, see:
+👉 [**iPhone Shortcut Setup Guide**](docs/shortcut_setup.md)
+
+## ⌨️ Shortcuts (On Device)
+- **Navigation**: Use the bottom buttons to cycle through available dates.
+- **Update Button (Long Press)**: View raw JSON data for debugging.
+- **WiFi Icon (Long Press)**: View the device IP address and network status.
