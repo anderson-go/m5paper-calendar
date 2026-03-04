@@ -1,0 +1,39 @@
+# IOS Shortcut Setup
+
+To keep your M5Paper calendar updated, you can use a "Get Contents of URL" action in an iPhone Shortcut.
+
+### 1. JSON Structure
+The shortcut should generate a JSON body with the following schema:
+
+```json
+{
+  "generated_at": "2026-03-04T12:00:00",
+  "weather_ls": [{
+    "high_ls": ["23°C", "21°C", ...],
+    "low_ls": ["14°C", "12°C", ...],
+    "rain_chance_ls": [0.97, 0.10, ...]
+  }],
+  "events": [
+    {
+      "title": "Meeting",
+      "all_day": "No",
+      "start_date": "2026-03-04T10:00:00+09:00"
+    },
+    {
+      "title": "Clean House",
+      "all_day": "Yes",
+      "start_date": "2026-03-04T00:00:00+09:00"
+    }
+  ]
+}
+```
+
+### 2. Shortcut Configuration
+1.  **Get Device IP**: Long-press the WiFi icon on your M5Paper to find its local IP address.
+2.  **Add Action**: "Get Contents of URL".
+3.  **URL**: `http://[DEVICE_IP]:80`
+4.  **Method**: `POST`
+5.  **Request Body**: Set to the JSON object described above.
+
+### 3. Automation
+For the best experience, set a **Time of Day** automation in the Shortcuts app to run at `00:00` daily, ensuring your calendar is always fresh when you wake up.
