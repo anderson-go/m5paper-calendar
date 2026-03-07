@@ -29,7 +29,7 @@ Upload the following files to your device's flash memory:
   - `img_battery_0.png` through `img_battery_3.png`
 
 ### 3. Deployment
-Copy `calendar_dynamic.py` to your device and run it as `main.py` if you want it to start automatically on boot.
+Copy `eink_calendar_dynamic.py` to your device and run it as `main.py` if you want it to start automatically on boot.
 
 ## 📲 Data Synchronization
 Data is pushed to the device via a custom iPhone Shortcut. For detailed instructions on how to set up the automation, see:
