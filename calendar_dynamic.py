@@ -16,7 +16,7 @@ LISTEN_PORT = 80
 
 # Timezone and Power
 UTC_OFFSET = 9     
-IDLE_TIMEOUT = 30  
+SLEEP_TIMEOUT = 60000 # 60 Seconds idle before Deep Sleep
 
 # UI Constants - Schedule
 L_RECT_X, L_RECT_W = 35, 85 
@@ -56,16 +56,46 @@ UPD_X, UPD_Y = 150, 930
 UPD_W, UPD_H = 240, 30
 ICON_Y, WIFI_X, BATT_X = 917, 433, 483 
 
-# Colors
-PERIOD_COLORS = [0xcccccc, 0xaaaaaa, 0x888888]
-WEATHER_TEXT_COLOR = 0x777777
-
 # Global State
 all_available_dates = []  
 current_date_idx = 0      
 cached_json = None        
 last_activity_time = 0    
 server_socket = None
+WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+PERIOD_COLORS = [0xcccccc, 0xaaaaaa, 0x888888]
+WEATHER_TEXT_COLOR = 0x777777
+
+# ---------- Power Management ----------
+
+def refresh_to_sleep():
+    """Erases interactive elements with precision offsets to protect background lines."""
+    # 1. Erase Navigation Buttons (80x80)
+    M5.Lcd.fillRect(BTN_L_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
+    M5.Lcd.fillRect(BTN_C_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
+    M5.Lcd.fillRect(BTN_R_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
+    
+    # 2. Erase Status Icons with BG-matching color (approx 0xeeeeee)
+    # WiFi: Offset +5px Right, +4px Down.
+    M5.Lcd.fillRect(WIFI_X + 5, ICON_Y + 4, 40, 40, 0xeeeeee)
+    # Battery: Offset +4px Down.
+    M5.Lcd.fillRect(BATT_X - 2, ICON_Y + 4, 55, 40, 0xeeeeee)
+
+def enter_deep_sleep():
+    """Clean UI and power down. Sleep image centered (320px wide)."""
+    refresh_to_sleep()
+    
+    img_x = (SCREEN_WIDTH - 320) // 2
+    img_y = BTN_Y + 5 
+    try:
+        Widgets.Image("/flash/res/img/img_deepsleep.png", img_x, img_y)
+    except:
+        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.setTextColor(0x888888, 0xffffff)
+        M5.Lcd.drawString("DEEP SLEEP", img_x + 80, img_y + 25)
+    
+    M5.update()
+    time.sleep(1) 
+    M5.Power.deepSleep()
 
 # ---------- Info Screens ----------
 
@@ -78,7 +108,7 @@ def wait_for_tap_to_return():
         if M5.Touch.getCount() > 0: break
         time.sleep(0.1)
     while M5.Touch.getCount() > 0: M5.update(); time.sleep(0.01)
-    refresh_view()
+    refresh_view(full=True)
 
 def show_wifi_info():
     M5.Lcd.fillScreen(0xffffff)
@@ -95,26 +125,10 @@ def show_wifi_info():
     M5.update()
     wait_for_tap_to_return()
 
-def show_debug_json():
-    M5.Lcd.fillScreen(0xffffff)
-    M5.Lcd.setFont(Widgets.FONTS.DejaVu12); M5.Lcd.setTextColor(0x000000, 0xffffff)
-    try:
-        with open('/flash/calendar.json', 'r') as f:
-            content = f.read()
-            line = 0
-            for i in range(0, len(content), 65):
-                M5.Lcd.drawString(content[i:i+65], 10, 30 + line*15)
-                line += 1
-                if line > 55: break
-    except: M5.Lcd.drawString("File not found", 10, 30)
-    M5.Lcd.drawString("--- TAP TO RETURN ---", 10, 920)
-    M5.update()
-    wait_for_tap_to_return()
-
 # ---------- Networking ----------
 
 def handle_incoming_request():
-    global cached_json
+    global cached_json, last_activity_time
     if not server_socket: return
     try:
         conn, addr = server_socket.accept()
@@ -128,7 +142,9 @@ def handle_incoming_request():
                     with open('/flash/calendar.json', 'w') as f: json.dump(new_data, f)
                     cached_json = new_data
                     update_state_from_json()
-                    play_click_sound(); refresh_view()
+                    play_click_sound()
+                    last_activity_time = time.ticks_ms()
+                    refresh_view(full=True)
                 except: pass
         conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nReceived')
         conn.close()
@@ -149,12 +165,12 @@ def start_server():
 
 def update_state_from_json():
     global all_available_dates, current_date_idx
-    if not cached_json: return
     today_iso, _, _ = get_local_now()
     dts = {today_iso}
-    for e in cached_json.get("events", []):
-        d = str(e.get('start_date', '')).strip()[:10]
-        if d: dts.add(d)
+    if cached_json:
+        for e in cached_json.get("events", []):
+            d = str(e.get('start_date', '')).strip()[:10]
+            if d: dts.add(d)
     all_available_dates = sorted(list(dts))
     current_date_idx = all_available_dates.index(today_iso) if today_iso in all_available_dates else 0
 
@@ -171,68 +187,53 @@ def _weekday_from_ymd(y, m, d):
 # ---------- UI Modules ----------
 
 def update_ui_weather(target_date):
-    """Refactored to use Direct LCD drawing for speed and reliability."""
     y_base = 820 + WEATHER_Y_OFFSET
-    M5.Lcd.fillRect(30, y_base, 480, 65, 0xffffff) # Background clear
+    # Clean only the numeric values, not titles
+    M5.Lcd.fillRect(88, y_base + 5, 80, 45, 0xffffff) # lo
+    M5.Lcd.fillRect(249, y_base + 5, 80, 45, 0xffffff) # hi
+    M5.Lcd.fillRect(414, y_base + 5, 80, 45, 0xffffff) # rain
     
-    if not cached_json or "weather_ls" not in cached_json: return
+    hi, lo, rn = "--", "--", "--%"
+    if cached_json and "weather_ls" in cached_json:
+        try:
+            json_today = cached_json["generated_at"].split('T')[0]
+            t_p, j_p = [int(x) for x in target_date.split('-')], [int(x) for x in json_today.split('-')]
+            idx = int((_time.mktime((t_p[0],t_p[1],t_p[2],0,0,0,0,0)) - _time.mktime((j_p[0],j_p[1],j_p[2],0,0,0,0,0))) / 86400)
+            w_ls = cached_json["weather_ls"][0]
+            idx = max(0, min(idx, len(w_ls["high_ls"]) - 1))
+            hi, lo = w_ls["high_ls"][idx].replace("°C", "").strip(), w_ls["low_ls"][idx].replace("°C", "").strip()
+            rn = str(int(w_ls["rain_chance_ls"][idx] * 100)) + "%"
+        except: pass
     
-    try:
-        # Calculate Index relative to JSON generation date
-        json_today = cached_json["generated_at"].split('T')[0]
-        t_p, j_p = [int(x) for x in target_date.split('-')], [int(x) for x in json_today.split('-')]
-        idx = int((_time.mktime((t_p[0],t_p[1],t_p[2],0,0,0,0,0)) - _time.mktime((j_p[0],j_p[1],j_p[2],0,0,0,0,0))) / 86400)
-        
-        w_ls = cached_json["weather_ls"][0]
-        # Safety clamp to prevent crash if date is out of range
-        idx = max(0, min(idx, len(w_ls["high_ls"]) - 1))
-        
-        hi = w_ls["high_ls"][idx].replace("°C", "").strip()
-        lo = w_ls["low_ls"][idx].replace("°C", "").strip()
-        rn = str(int(w_ls["rain_chance_ls"][idx] * 100)) + "%"
-        
-        M5.Lcd.setTextColor(WEATHER_TEXT_COLOR, 0xffffff)
-        
-        # Draw Min
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("min", 32, y_base + 8)
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(lo, 88, y_base + 5)
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("o", 146 if len(lo)>1 else 126, y_base + 4)
-        
-        # Draw Max
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("max", 188, y_base + 8)
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(hi, 249, y_base + 5)
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("o", 304 if len(hi)>1 else 284, y_base + 4)
-        
-        # Draw Rain
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("rain", 353, y_base + 8)
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(rn, 414, y_base + 5)
-    except: pass
+    M5.Lcd.setTextColor(WEATHER_TEXT_COLOR, 0xffffff)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("min", 32, y_base + 8)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(lo, 88, y_base + 5)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("o", 146 if len(lo)>1 else 126, y_base + 4)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("max", 188, y_base + 8)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(hi, 249, y_base + 5)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("o", 304 if len(hi)>1 else 284, y_base + 4)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu24); M5.Lcd.drawString("rain", 353, y_base + 8)
+    M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.drawString(rn, 414, y_base + 5)
 
 def draw_month_grid(target_date_str):
     rtc_iso, _, _ = get_local_now()
     rtc_y, rtc_m, rtc_d = [int(x) for x in rtc_iso.split('-')]
     y, m, _ = [int(x) for x in target_date_str.split('-')]
-    
-    headers = ["日", "月", "火", "水", "木", "金", "土"]
     M5.Lcd.setFont(JP_FONT); M5.Lcd.setTextColor(0x000000, 0xffffff)
+    headers = ["日", "月", "火", "水", "木", "金", "土"]
     for i, h in enumerate(headers):
         M5.Lcd.drawString(h, CAL_X + i * (CELL_W + CELL_GAP) + 4, CAL_Y - 35)
-
     first_wd = (_weekday_from_ymd(y, m, 1) + 1) % 7
     days_in_m = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m-1]
     if m == 2 and (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)): days_in_m = 29
-    
     for i in range(35):
         col, row = i % 7, i // 7
         day_val = (i - first_wd) + 1
-        x = CAL_X + col * (CELL_W + CELL_GAP)
-        y_pos = CAL_Y + row * (CELL_H + CELL_GAP)
+        x, y_pos = CAL_X + col * (CELL_W + CELL_GAP), CAL_Y + row * (CELL_H + CELL_GAP)
         bg, txt = CLR_MONTH_CELL, CLR_FUTURE
         if day_val <= 0:
             pm = m - 1 if m > 1 else 12
-            py = y if m > 1 else y - 1
             dim_p = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][pm-1]
-            if pm == 2 and (py % 4 == 0 and (py % 100 != 0 or py % 400 == 0)): dim_p = 29
             lbl, bg, txt = str(dim_p + day_val), CLR_OTHER_CELL, CLR_OTHER
         elif day_val > days_in_m:
             lbl, bg, txt = str(day_val - days_in_m), CLR_OTHER_CELL, CLR_OTHER
@@ -249,15 +250,17 @@ def draw_month_grid(target_date_str):
 def update_ui_events(events, target_date):
     M5.Lcd.fillRect(35, Y_START_BASE, 480, 450, 0xffffff)
     day_evs = [e for e in events if target_date in str(e.get('start_date', '')).strip()]
+    if not day_evs:
+        try: Widgets.Image("/flash/res/img/img_noevents.png", (SCREEN_WIDTH - 400) // 2, Y_START_BASE + 100)
+        except:
+            M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.setTextColor(0x888888, 0xffffff)
+            M5.Lcd.drawString("No events", 180, Y_START_BASE + 180)
+        return
     all_day = [e for e in day_evs if str(e.get('all_day', '')).strip().lower() == "yes"]
     timed = sorted([e for e in day_evs if str(e.get('all_day', '')).strip().lower() != "yes"], key=lambda x: str(x.get('start_date', '')))
-    if not day_evs:
-        M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.setTextColor(0x888888, 0xffffff)
-        M5.Lcd.drawString("No events", (SCREEN_WIDTH - M5.Lcd.textWidth("No events")) // 2, Y_START_BASE + 180)
-        return
     y_off, rect_h = (45, RECT_H_BASE - 15) if all_day else (0, RECT_H_BASE)
     y_cursor = Y_START_BASE + y_off
-    for color in [0xcccccc, 0xaaaaaa, 0x888888]:
+    for color in PERIOD_COLORS:
         M5.Lcd.fillRect(L_RECT_X, y_cursor, L_RECT_W, rect_h, color)
         M5.Lcd.fillRect(R_RECT_X, y_cursor, R_RECT_W, rect_h, color); y_cursor += (rect_h + GAP)
     cur_y = Y_START_BASE + 5
@@ -275,33 +278,43 @@ def update_ui_events(events, target_date):
             final_y = block_y + 25 
             if final_y < last_y + 35: final_y = last_y + 35
             last_y = final_y
-            M5.Lcd.setFont(TIME_FONT); M5.Lcd.setTextColor(0x000000, [0xcccccc, 0xaaaaaa, 0x888888][p_idx])
+            M5.Lcd.setFont(TIME_FONT); M5.Lcd.setTextColor(0x000000, PERIOD_COLORS[p_idx])
             M5.Lcd.drawString(t_str, L_RECT_X + 5, final_y)
             M5.Lcd.setFont(JP_FONT); M5.Lcd.setTextColor(0x000000, 0xffffff); M5.Lcd.drawString(e.get('title', ''), L_RECT_X + L_RECT_W + 15, final_y)
         except: pass
 
-def refresh_view():
-    if not cached_json or not all_available_dates: return
-    Widgets.Image("/flash/res/img/bg_two_blocks_w.png", 0, 0)
+def refresh_view(full=False):
+    """Smart refresh. full=True draws background and calendar. False skips them for speed."""
+    if full:
+        Widgets.Image("/flash/res/img/bg_two_blocks_w.png", 0, 0)
+        draw_month_grid(all_available_dates[current_date_idx] if all_available_dates else get_local_now()[0])
+    else:
+        # Partial Erase: Top Left Module and Schedule Area + Navi Bar
+        M5.Lcd.fillRect(0, 0, LEFT_COLUMN_WIDTH, 250, 0xffffff)
+        M5.Lcd.fillRect(0, Y_START_BASE, 540, 710 - Y_START_BASE, 0xffffff)
+    
     today_iso, _, _ = get_local_now()
-    target_date = all_available_dates[current_date_idx]
+    target_date = all_available_dates[current_date_idx] if all_available_dates else today_iso
     d_num, d_name = extract_date_info(target_date)
+    
     center_x = 130 + TOP_LEFT_OFFSET_X
     M5.Lcd.setFont(Widgets.FONTS.DejaVu40); M5.Lcd.setTextColor(0x000000, 0xffffff) 
     M5.Lcd.drawString(d_name, center_x - (M5.Lcd.textWidth(d_name) // 2), 32)
     M5.Lcd.setFont(Widgets.FONTS.DejaVu72); tw = M5.Lcd.textWidth(d_num)
     try: Widgets.Label(d_num, center_x - int(tw * 1.3), 91, 1.0, 0x000000, 0xffffff, '/flash/res/font/Oxanium-SemiBold-190px.vlw')
     except: M5.Lcd.drawString(d_num, center_x - (tw // 2), 91)
-    draw_month_grid(target_date)
-    update_ui_events(cached_json.get("events", []), target_date)
+    
+    update_ui_events(cached_json.get("events", []) if cached_json else [], target_date)
     update_ui_weather(target_date)
-    update_ui_footer(cached_json.get("generated_at", ""))
+    update_ui_footer(cached_json.get("generated_at", "") if cached_json else "")
     update_ui_status_icons()
+    
+    # Buttons
     M5.Lcd.fillRect(BTN_L_X, BTN_Y, 480, BTN_H, 0xffffff)
-    if current_date_idx > 0: draw_day_button(BTN_L_X, BTN_Y, all_available_dates[current_date_idx-1])
-    target_today_idx = all_available_dates.index(today_iso) if today_iso in all_available_dates else 0
-    if current_date_idx != target_today_idx: Widgets.Image("/flash/res/img/img_back_today.png", BTN_C_X, BTN_Y)
-    if current_date_idx < len(all_available_dates) - 1: draw_day_button(BTN_R_X, BTN_Y, all_available_dates[current_date_idx+1])
+    if all_available_dates and current_date_idx > 0: draw_day_button(BTN_L_X, BTN_Y, all_available_dates[current_date_idx-1])
+    target_idx = all_available_dates.index(today_iso) if (all_available_dates and today_iso in all_available_dates) else 0
+    if all_available_dates and current_date_idx != target_idx: Widgets.Image("/flash/res/img/img_back_today.png", BTN_C_X, BTN_Y)
+    if all_available_dates and current_date_idx < len(all_available_dates) - 1: draw_day_button(BTN_R_X, BTN_Y, all_available_dates[current_date_idx+1])
     M5.update()
 
 # ---------- Shared Utils ----------
@@ -333,6 +346,10 @@ def update_ui_footer(gen_at, is_pressed=False):
     M5.Lcd.fillRect(UPD_X - 20, UPD_Y - 5, UPD_W + 40, UPD_H + 10, bg_color)
     M5.Lcd.setFont(Widgets.FONTS.DejaVu18); M5.Lcd.setTextColor(0xffffff, bg_color); M5.Lcd.drawString(msg, UPD_X, UPD_Y)
 
+def play_click_sound():
+    try: M5.Speaker.tone(2000, 50) 
+    except: pass
+
 # ---------- Setup / Loop ----------
 
 def setup():
@@ -341,9 +358,9 @@ def setup():
     wlan = network.WLAN(network.STA_IF); wlan.active(True)
     try:
         with open('/flash/calendar.json', 'r') as f: cached_json = json.load(f)
-        update_state_from_json(); refresh_view()
-    except: pass
-    timeout = 15
+    except: cached_json = None
+    update_state_from_json(); refresh_view(full=True)
+    timeout = 10
     while not wlan.isconnected() and timeout > 0: time.sleep(1); timeout -= 1
     if wlan.isconnected():
         try: ntptime.settime()
@@ -351,41 +368,29 @@ def setup():
         start_server()
     last_activity_time = time.ticks_ms()
 
-def play_click_sound():
-    try: M5.Speaker.tone(2000, 50) 
-    except: pass
-
-WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-
 def loop():
     global current_date_idx, last_activity_time
     M5.update(); handle_incoming_request()
+    if time.ticks_diff(time.ticks_ms(), last_activity_time) > SLEEP_TIMEOUT:
+        enter_deep_sleep()
     today_iso, _, _ = get_local_now()
-    target_today_idx = all_available_dates.index(today_iso) if (cached_json and today_iso in all_available_dates) else 0
-    if current_date_idx != target_today_idx and time.ticks_diff(time.ticks_ms(), last_activity_time) > IDLE_TIMEOUT * 1000:
-        current_date_idx = target_today_idx; refresh_view(); last_activity_time = time.ticks_ms()
+    target_idx = all_available_dates.index(today_iso) if (all_available_dates and today_iso in all_available_dates) else 0
     if M5.Touch.getCount() > 0:
         last_activity_time = time.ticks_ms(); tx, ty = M5.Touch.getX(), M5.Touch.getY(); clicked = False
         if BTN_Y <= ty <= BTN_Y + BTN_H:
             if BTN_L_X <= tx <= BTN_L_X + BTN_W and current_date_idx > 0: current_date_idx -= 1; clicked = True
-            elif current_date_idx != target_today_idx and BTN_C_X <= tx <= BTN_C_X + BTN_W: current_date_idx = target_today_idx; clicked = True
+            elif current_date_idx != target_idx and BTN_C_X <= tx <= BTN_C_X + BTN_W: current_date_idx = target_idx; clicked = True
             elif BTN_R_X <= tx <= BTN_R_X + BTN_W and current_date_idx < len(all_available_dates) - 1: current_date_idx += 1; clicked = True
-        elif UPD_Y - 10 <= ty <= UPD_Y + UPD_H and UPD_X <= tx <= UPD_X + UPD_W:
-            start_p = time.ticks_ms()
-            while M5.Touch.getCount() > 0:
-                M5.update(); handle_incoming_request()
-                if time.ticks_diff(time.ticks_ms(), start_p) > 2000: play_click_sound(); show_debug_json(); return
-                time.sleep(0.05)
         elif ICON_Y - 10 <= ty <= 960 and WIFI_X - 10 <= tx <= 540:
             start_p = time.ticks_ms()
             while M5.Touch.getCount() > 0:
-                M5.update(); handle_incoming_request()
+                M5.update()
                 if time.ticks_diff(time.ticks_ms(), start_p) > 2000: play_click_sound(); show_wifi_info(); return
                 time.sleep(0.05)
         if clicked:
             play_click_sound()
-            while M5.Touch.getCount() > 0: M5.update(); handle_incoming_request(); time.sleep(0.01)
-            refresh_view()
+            while M5.Touch.getCount() > 0: M5.update(); time.sleep(0.01)
+            refresh_view(full=False)
     time.sleep(0.05)
 
 if __name__ == "__main__":
