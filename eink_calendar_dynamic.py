@@ -7,6 +7,7 @@ import json
 import socket
 import utime as _time
 import ntptime
+import machine
 
 # Configuration
 SCREEN_WIDTH = 540
@@ -16,8 +17,9 @@ LISTEN_PORT = 80
 
 # Timezone and Power
 UTC_OFFSET = 9     
-IDLE_TIMEOUT = 30    # Seconds to return to today
-SLEEP_TIMEOUT = 60   # Seconds idle before Deep Sleep
+IDLE_TIMEOUT = 30           # Seconds to return to today
+SLEEP_TIMEOUT = 60          # Seconds idle before Deep Sleep
+MAINTENANCE_WINDOW = 600    # 10 minutes (600s) to stay awake at midnight for updates
 
 # UI Constants - Schedule
 L_RECT_X, L_RECT_W = 35, 85 
@@ -65,6 +67,7 @@ last_activity_time = 0
 server_socket = None
 last_wifi_state = None
 last_batt_lvl = -1
+full_refresh_done = False # To handle midnight rollover once
 
 WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 PERIOD_COLORS = [0xcccccc, 0xaaaaaa, 0x888888]
@@ -72,23 +75,30 @@ WEATHER_TEXT_COLOR = 0x777777
 
 # ---------- Power Management ----------
 
+def get_seconds_until_midnight():
+    """Calculates seconds until the next midnight based on local time."""
+    _, _, lt = get_local_now()
+    h, m, s = lt[3], lt[4], lt[5]
+    seconds_past_midnight = (h * 3600) + (m * 60) + s
+    seconds_in_day = 24 * 3600
+    return seconds_in_day - seconds_past_midnight
+
 def refresh_to_sleep():
     """Erases interactive elements with precision offsets to protect background lines."""
-    # 1. Erase Navigation Buttons (80x80)
     M5.Lcd.fillRect(BTN_L_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
     M5.Lcd.fillRect(BTN_C_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
     M5.Lcd.fillRect(BTN_R_X - 1, BTN_Y - 1, BTN_W + 2, BTN_H + 2, 0xffffff)
-    
-    # 2. Erase Status Icons with BG-matching darker color (0xdddddd)
-    # WiFi: Fixed Offset +5px Right, +6px Down.
     M5.Lcd.fillRect(WIFI_X + 5, ICON_Y + 6, 40, 40, 0xdddddd)
-    # Battery: Offset +6px Down.
     M5.Lcd.fillRect(BATT_X - 2, ICON_Y + 6, 55, 40, 0xdddddd)
 
 def enter_deep_sleep():
-    """Clean UI and power down. Sleep image centered (320px wide)."""
+    """Clean UI and power down until next midnight."""
+    # Safety: Don't sleep if we are currently in the maintenance window
+    _, _, lt = get_local_now()
+    if lt[3] == 0 and lt[4] < (MAINTENANCE_WINDOW // 60):
+        return
+
     refresh_to_sleep()
-    
     img_x = (SCREEN_WIDTH - 320) // 2
     img_y = BTN_Y + 5 
     try:
@@ -99,7 +109,10 @@ def enter_deep_sleep():
     
     M5.update()
     time.sleep(1) 
-    M5.Power.deepSleep()
+    
+    # Calculate sleep duration to wake up exactly at midnight
+    sleep_ms = get_seconds_until_midnight() * 1000
+    machine.deepsleep(sleep_ms)
 
 # ---------- Info Screens ----------
 
@@ -193,10 +206,9 @@ def _weekday_from_ymd(y, m, d):
 def update_ui_weather(target_date, clean=True):
     y_base = 820 + WEATHER_Y_OFFSET
     if clean:
-        # Clean only the numeric values area, widened to handle double digits + degree ghosting
-        M5.Lcd.fillRect(88, y_base + 5, 75, 45, 0xffffff)  # Lo + degree area
-        M5.Lcd.fillRect(249, y_base + 5, 75, 45, 0xffffff) # Hi + degree area
-        M5.Lcd.fillRect(414, y_base + 5, 80, 45, 0xffffff) # Rain
+        M5.Lcd.fillRect(88, y_base + 5, 75, 45, 0xffffff) 
+        M5.Lcd.fillRect(249, y_base + 5, 75, 45, 0xffffff)
+        M5.Lcd.fillRect(414, y_base + 5, 90, 45, 0xffffff) # Widened to 90px
     
     hi, lo, rn = "--", "--", "--%"
     if cached_json and "weather_ls" in cached_json:
@@ -216,7 +228,6 @@ def update_ui_weather(target_date, clean=True):
     M5.Lcd.drawString(hi, 249, y_base + 5)
     M5.Lcd.drawString(rn, 414, y_base + 5)
     
-    # Degrees symbol markers
     M5.Lcd.setFont(Widgets.FONTS.DejaVu24)
     M5.Lcd.drawString("o", 146 if len(lo)>1 else 126, y_base + 4)
     M5.Lcd.drawString("o", 304 if len(hi)>1 else 284, y_base + 4)
@@ -296,29 +307,19 @@ def refresh_view(full=False):
     if full:
         Widgets.Image("/flash/res/img/bg_two_blocks_w.png", 0, 0)
         draw_month_grid(all_available_dates[current_date_idx] if all_available_dates else get_local_now()[0])
-        # Draw permanent labels once
         M5.Lcd.setTextColor(WEATHER_TEXT_COLOR, 0xffffff)
         M5.Lcd.setFont(Widgets.FONTS.DejaVu24)
         M5.Lcd.drawString("min", 32, y_base_weather + 8)
         M5.Lcd.drawString("max", 188, y_base_weather + 8)
         M5.Lcd.drawString("rain", 353, y_base_weather + 8)
     else:
-        # 1. Erase all partial areas FIRST
-        # Top Left (preserve 15px margin)
         M5.Lcd.fillRect(15, 0, LEFT_COLUMN_WIDTH - 15, 235, 0xffffff)
-        # Schedule Area (preserve 15px margin)
         M5.Lcd.fillRect(15, Y_START_BASE, 525, 710 - Y_START_BASE, 0xffffff)
-        
-        # Weather Numerals (CLEAN ONLY NUMERALS AREA, PRESERVING LABELS)
-        # We start clearing from x=88, x=249, etc., which are to the right of the labels
-        M5.Lcd.fillRect(88, y_base_weather + 5, 75, 45, 0xffffff)  # Lo + degree area
-        M5.Lcd.fillRect(249, y_base_weather + 5, 75, 45, 0xffffff) # Hi + degree area
-        M5.Lcd.fillRect(414, y_base_weather + 5, 80, 45, 0xffffff) # Rain
-        
-        # Nav Buttons
+        M5.Lcd.fillRect(88, y_base_weather + 5, 75, 45, 0xffffff)
+        M5.Lcd.fillRect(249, y_base_weather + 5, 75, 45, 0xffffff)
+        M5.Lcd.fillRect(414, y_base_weather + 5, 90, 45, 0xffffff) # Widened to 90px
         M5.Lcd.fillRect(BTN_L_X, BTN_Y, 480, BTN_H, 0xffffff)
 
-    # 2. Draw Modules
     today_iso, _, _ = get_local_now()
     target_date = all_available_dates[current_date_idx] if all_available_dates else today_iso
     d_num, d_name = extract_date_info(target_date)
@@ -330,13 +331,11 @@ def refresh_view(full=False):
     try: Widgets.Label(d_num, center_x - int(tw * 1.3), 91, 1.0, 0x000000, 0xffffff, '/flash/res/font/Oxanium-SemiBold-190px.vlw')
     except: M5.Lcd.drawString(d_num, center_x - (tw // 2), 91)
     
-    # Draw logic with clean=False to avoid double-clearing
     update_ui_events(cached_json.get("events", []) if cached_json else [], target_date, clean=False)
     update_ui_weather(target_date, clean=False)
     update_ui_footer(cached_json.get("generated_at", "") if cached_json else "")
     update_ui_status_icons()
     
-    # Redraw Nav Buttons
     if all_available_dates and current_date_idx > 0: draw_day_button(BTN_L_X, BTN_Y, all_available_dates[current_date_idx-1])
     target_today_idx = all_available_dates.index(today_iso) if (all_available_dates and today_iso in all_available_dates) else 0
     if all_available_dates and current_date_idx != target_today_idx: Widgets.Image("/flash/res/img/img_back_today.png", BTN_C_X, BTN_Y)
@@ -350,9 +349,7 @@ def update_ui_status_icons():
     global last_wifi_state, last_batt_lvl
     wlan = network.WLAN(network.STA_IF)
     curr_wifi = wlan.isconnected()
-    
     lvl = M5.Power.getBatteryLevel()
-    # Bucket battery into 4 brackets to avoid micro-refreshes
     curr_batt_bracket = 3 if lvl > 80 else 2 if lvl > 40 else 1 if lvl > 5 else 0
     
     if curr_wifi != last_wifi_state or curr_batt_bracket != last_batt_lvl:
@@ -360,7 +357,6 @@ def update_ui_status_icons():
             try: Widgets.Image("/flash/res/img/img_wifi.png", WIFI_X, ICON_Y)
             except: pass
         else:
-            # Clean wifi area if disconnected - Fixed Offset +5px
             M5.Lcd.fillRect(WIFI_X + 5, ICON_Y + 6, 40, 40, 0xdddddd)
             
         b = "img_battery_3.png" if curr_batt_bracket == 3 else "img_battery_2.png" if curr_batt_bracket == 2 else "img_battery_1.png" if curr_batt_bracket == 1 else "img_battery_0.png"
@@ -406,28 +402,45 @@ def setup():
         try: ntptime.settime()
         except: pass
         start_server()
-    last_activity_time = time.ticks_ms()
+    
+    _, _, lt = get_local_now()
+    if lt[3] == 0 and lt[4] < (MAINTENANCE_WINDOW // 60):
+        last_activity_time = time.ticks_ms()
+    else:
+        last_activity_time = time.ticks_ms()
 
 def loop():
-    global current_date_idx, last_activity_time
+    global current_date_idx, last_activity_time, full_refresh_done
     M5.update(); handle_incoming_request()
     
     elapsed = time.ticks_diff(time.ticks_ms(), last_activity_time)
     
-    # 1. Idle Return Logic (Return to today if idle for 30s)
+    # 1. Maintenance Window Check (Midnight Update)
+    _, _, lt = get_local_now()
+    if lt[3] == 0 and lt[4] < (MAINTENANCE_WINDOW // 60):
+        # We are in the window, keep server alive
+        last_activity_time = time.ticks_ms()
+        # Perform ONE full refresh at midnight to roll over grid
+        if not full_refresh_done:
+            refresh_view(full=True)
+            full_refresh_done = True
+    else:
+        # Outside window, reset flag for next midnight
+        full_refresh_done = False
+
+    # 2. Idle Return Logic (Return to today if idle for 30s)
     today_iso, _, _ = get_local_now()
     target_today_idx = all_available_dates.index(today_iso) if (all_available_dates and today_iso in all_available_dates) else 0
-    
     if current_date_idx != target_today_idx and elapsed > IDLE_TIMEOUT * 1000:
         current_date_idx = target_today_idx
         refresh_view(full=False)
         last_activity_time = time.ticks_ms()
 
-    # 2. Deep Sleep Check (After 60s)
+    # 3. Deep Sleep Check (After 60s of true inactivity)
     if elapsed > SLEEP_TIMEOUT * 1000:
         enter_deep_sleep()
 
-    # 3. Touch Logic
+    # 4. Touch Logic
     if M5.Touch.getCount() > 0:
         last_activity_time = time.ticks_ms()
         tx, ty = M5.Touch.getX(), M5.Touch.getY(); clicked = False
